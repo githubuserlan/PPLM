@@ -1,0 +1,37 @@
+﻿murder
+weapon
+killer
+murderer
+knife
+poison
+venom
+victim
+vengeance
+detective
+investigation
+witness
+crime
+gun
+body
+corpse
+stabbing
+knifing
+suspect
+arrest
+blood
+hint
+evidence
+motive
+whodunit
+revenge
+lethal
+electrocution
+strangled
+case
+robbery
+steal
+hide
+murder mystery
+murder weapon
+murder victim
+cause of death

@@ -24,6 +24,7 @@ python examples/run_pplm.py -D sentiment --class_label 3 --cond_text "The lake" 
 
 import argparse
 import json
+import random
 from operator import add
 from typing import List, Optional, Tuple, Union
 
@@ -65,6 +66,7 @@ BAG_OF_WORDS_ARCHIVE_MAP = {
     'science': "https://s3.amazonaws.com/models.huggingface.co/bert/pplm/bow/science.txt",
     'space': "https://s3.amazonaws.com/models.huggingface.co/bert/pplm/bow/space.txt",
     'technology': "https://s3.amazonaws.com/models.huggingface.co/bert/pplm/bow/technology.txt",
+    'crime': "paper_code/wordlists/crime.txt"
 }
 
 DISCRIMINATOR_MODELS_PARAMS = {
@@ -419,6 +421,7 @@ def full_text_generation(
         gm_scale=0.9,
         kl_scale=0.01,
         verbosity_level=REGULAR,
+        repetition_penalty=1.0,
         **kwargs
 ):
     classifier, class_id = get_classifier(
@@ -459,6 +462,7 @@ def full_text_generation(
         length=length,
         sample=sample,
         perturb=False,
+        repetition_penalty=repetition_penalty,
         verbosity_level=verbosity_level
     )
     if device == 'cuda':
@@ -492,6 +496,7 @@ def full_text_generation(
             gamma=gamma,
             gm_scale=gm_scale,
             kl_scale=kl_scale,
+            repetition_penalty=repetition_penalty,
             verbosity_level=verbosity_level
         )
         pert_gen_tok_texts.append(pert_gen_tok_text)
@@ -529,6 +534,7 @@ def generate_text_pplm(
         gamma=1.5,
         gm_scale=0.9,
         kl_scale=0.01,
+        repetition_penalty=1.0,
         verbosity_level=REGULAR
 ):
     output_so_far = None
@@ -609,6 +615,12 @@ def generate_text_pplm(
 
         pert_logits, past, pert_all_hidden = model(last, past=pert_past)
         pert_logits = pert_logits[:, -1, :] / temperature  # + SMALL_CONST
+        for token_idx in set(output_so_far[0].tolist()):
+            if pert_logits[0, token_idx] < 0:
+                pert_logits[0, token_idx] *= repetition_penalty
+            else:
+                pert_logits[0, token_idx] /= repetition_penalty
+
         pert_probs = F.softmax(pert_logits, dim=-1)
 
         if classifier is not None:
@@ -675,12 +687,13 @@ def set_generic_model_params(discrim_weights, discrim_meta):
     DISCRIMINATOR_MODELS_PARAMS['generic'] = meta
 
 
-def run_pplm_example(
+def generate_case_detail(
         pretrained_model="gpt2-medium",
         cond_text="",
         uncond=False,
+        context=None,
         num_samples=1,
-        bag_of_words=None,
+        bag_of_words="crime",
         discrim=None,
         discrim_weights=None,
         discrim_meta=None,
@@ -701,9 +714,12 @@ def run_pplm_example(
         seed=0,
         no_cuda=False,
         colorama=False,
-        verbosity='regular'
+        repetition_penalty=1.0,
+        verbosity='quiet'
 ):
     # set Random seed
+    if seed == 0:
+        seed = random.randrange(0,2147483646)
     torch.manual_seed(seed)
     np.random.seed(seed)
 
@@ -722,9 +738,6 @@ def run_pplm_example(
         ]
         if pretrained_model != discriminator_pretrained_model:
             pretrained_model = discriminator_pretrained_model
-            if verbosity_level >= REGULAR:
-                print("discrim = {}, pretrained_model set "
-                "to discriminator's = {}".format(discrim, pretrained_model))
 
     # load pretrained model
     model = GPT2LMHeadModel.from_pretrained(
@@ -744,22 +757,22 @@ def run_pplm_example(
     # figure out conditioning text
     if uncond:
         tokenized_cond_text = tokenizer.encode(
-            [tokenizer.bos_token],
+            [tokenizer.bos_token] ,
+            add_special_tokens=False
+        )
+    elif context==None:
+        raw_text = cond_text
+        tokenized_cond_text = tokenizer.encode(
+            raw_text,
             add_special_tokens=False
         )
     else:
-        raw_text = cond_text
-        while not raw_text:
-            print("Did you forget to add `--cond_text`? ")
-            raw_text = input("Model prompt >>> ")
+        raw_text = context + " " + cond_text
         tokenized_cond_text = tokenizer.encode(
-            tokenizer.bos_token + raw_text,
+            raw_text,
             add_special_tokens=False
         )
 
-    print("= Prefix of sentence =")
-    print(tokenizer.decode(tokenized_cond_text))
-    print()
 
     # generate unperturbed and perturbed texts
 
@@ -787,17 +800,21 @@ def run_pplm_example(
         gamma=gamma,
         gm_scale=gm_scale,
         kl_scale=kl_scale,
+        repetition_penalty=repetition_penalty,
         verbosity_level=verbosity_level
     )
-
-    # untokenize unperturbed text
     unpert_gen_text = tokenizer.decode(unpert_gen_tok_text.tolist()[0])
-
-    if verbosity_level >= REGULAR:
-        print("=" * 80)
-    print("= Unperturbed generated text =")
-    print(unpert_gen_text)
-    print()
+    #print(tokenizer.decode(pert_gen_tok_texts.tolist()[0]))
+    #print(tokenizer.decode(tokenized_cond_text.tolist()[0]))
+    
+    #truncating generated text
+    endofSentence = False
+    maxLength = len(unpert_gen_text)-1
+    for i in range(0, maxLength):
+        if(endofSentence == False):
+            if(unpert_gen_text[maxLength - i] == "." or unpert_gen_text[maxLength - i] == "!" or unpert_gen_text[maxLength - i] == "?" or unpert_gen_text[maxLength - i] == ")"):
+                unpert_gen_text = unpert_gen_text[0:maxLength-i+1:]
+                endofSentence = True
 
     generated_texts = []
 
@@ -811,39 +828,99 @@ def run_pplm_example(
             # w[0] because we are sure w has only 1 item because previous fitler
             bow_word_ids.update(w[0] for w in filtered)
 
-    # iterate through the perturbed texts
-    for i, pert_gen_tok_text in enumerate(pert_gen_tok_texts):
-        try:
-            # untokenize unperturbed text
-            if colorama:
-                import colorama
-
-                pert_gen_text = ''
-                for word_id in pert_gen_tok_text.tolist()[0]:
-                    if word_id in bow_word_ids:
-                        pert_gen_text += '{}{}{}'.format(
-                            colorama.Fore.RED,
-                            tokenizer.decode([word_id]),
-                            colorama.Style.RESET_ALL
-                        )
-                    else:
-                        pert_gen_text += tokenizer.decode([word_id])
-            else:
-                pert_gen_text = tokenizer.decode(pert_gen_tok_text.tolist()[0])
-
-            print("= Perturbed generated text {} =".format(i + 1))
-            print(pert_gen_text)
-            print()
-        except:
-            pass
-
         # keep the prefix, perturbed seq, original seq for each index
         generated_texts.append(
             (tokenized_cond_text, pert_gen_tok_text, unpert_gen_tok_text)
         )
 
-    return
+    return generated_texts, unpert_gen_text
 
+def generate_case(
+        prompt="You are a Detective. You enter the crime scene. It was most likely murder. The victim is ",
+        pretrained_model="gpt2-medium",
+        num_samples=1,
+        bag_of_words="crime",
+        discrim=None,
+        discrim_weights=None,
+        discrim_meta=None,
+        class_label=-1,
+        length=100,
+        stepsize=0.02,
+        temperature=1.0,
+        top_k=10,
+        sample=True,
+        num_iterations=3,
+        grad_length=10000,
+        horizon_length=1,
+        window_length=0,
+        decay=False,
+        gamma=1.5,
+        gm_scale=0.9,
+        kl_scale=0.01,
+        repetition_penalty=1.0,
+        seed=0
+):
+    context=""
+    case_detail_context, case_detail_out = generate_case_detail(
+        pretrained_model=pretrained_model,
+        cond_text=prompt,
+        num_samples=num_samples,
+        bag_of_words=bag_of_words,
+        discrim=discrim,
+        discrim_weights=discrim_weights,
+        discrim_meta=discrim_meta,
+        class_label=class_label,
+        length=length,
+        stepsize=stepsize,
+        temperature=temperature,
+        top_k=top_k,
+        sample=sample,
+        num_iterations=num_iterations,
+        grad_length=grad_length,
+        horizon_length=horizon_length,
+        window_length=window_length,
+        decay=decay,
+        gamma=gamma,
+        gm_scale=gm_scale,
+        kl_scale=kl_scale,
+        repetition_penalty=repetition_penalty,
+        seed=seed
+    )
+    context = case_detail_out
+    print (case_detail_out)
+    print ("How do you want to continue the investigation?")
+    answer = input()
+    while answer != "Quit Game":
+        case_detail_context, case_detail_out = generate_case_detail(
+            pretrained_model=pretrained_model,
+            cond_text=answer,
+            context=context,
+            num_samples=num_samples,
+            bag_of_words=bag_of_words,
+            discrim=discrim,
+            discrim_weights=discrim_weights,
+            discrim_meta=discrim_meta,
+            class_label=class_label,
+            length=length,
+            stepsize=stepsize,
+            temperature=temperature,
+            top_k=top_k,
+            sample=sample,
+            num_iterations=num_iterations,
+            grad_length=grad_length,
+            horizon_length=horizon_length,
+            window_length=window_length,
+            decay=decay,
+            gamma=gamma,
+            gm_scale=gm_scale,
+            kl_scale=kl_scale,
+            repetition_penalty=repetition_penalty,
+            seed=seed
+        )
+        context += " " + case_detail_out
+        print (case_detail_out)
+        print ("How do you want to continue the investigation?")
+        answer = input()
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
